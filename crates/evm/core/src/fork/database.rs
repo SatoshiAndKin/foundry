@@ -284,6 +284,92 @@ mod tests {
     use alloy_provider::{ProviderBuilder, mock::Asserter};
     use foundry_common::provider::get_http_provider;
     use revm::database::DbAccount;
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+        hint::black_box,
+    };
+
+    struct SnapshotTestAllocator;
+
+    thread_local! {
+        static SNAPSHOT_ALLOCATED_BYTES: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    fn count_snapshot_allocation(bytes: usize) {
+        SNAPSHOT_ALLOCATED_BYTES.with(|count| {
+            if let Some(previous) = count.get() {
+                count.set(Some(previous + bytes));
+            }
+        });
+    }
+
+    unsafe impl GlobalAlloc for SnapshotTestAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count_snapshot_allocation(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            count_snapshot_allocation(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            count_snapshot_allocation(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static SNAPSHOT_TEST_ALLOCATOR: SnapshotTestAllocator = SnapshotTestAllocator;
+
+    #[test]
+    fn fork_history_snapshots_bound_cache_copy_memory() {
+        let provider =
+            ProviderBuilder::<_, _, AnyNetwork>::default().connect_mocked_client(Asserter::new());
+        let remote = BlockchainDb::new(
+            BlockchainDbMeta::new(BlockEnv::default(), "http://localhost".to_string()),
+            None,
+        );
+        let address = Address::with_last_byte(1);
+        remote.accounts().write().insert(address, AccountInfo::from_balance(U256::from(7)));
+        remote
+            .storage()
+            .write()
+            .entry(address)
+            .or_default()
+            .extend((0..16_384u64).map(|slot| (U256::from(slot), U256::from(slot + 1))));
+        remote.block_hashes().write().insert(U256::ONE, B256::with_last_byte(7));
+        let (backend, handler) = SharedBackend::new(provider, remote.clone(), None);
+        drop(handler);
+        let db = ForkedDatabase::new(backend, remote.clone());
+
+        SNAPSHOT_ALLOCATED_BYTES.with(|count| count.set(Some(0)));
+        let snapshots = (0..96).map(|_| db.create_state_snapshot()).collect::<Vec<_>>();
+        black_box(&snapshots);
+        let allocated = SNAPSHOT_ALLOCATED_BYTES.with(|count| count.replace(None).unwrap());
+        foundry_common::sh_println!("96 fork snapshots allocated {allocated} bytes").unwrap();
+        assert!(allocated < 1024 * 1024, "fork snapshots allocated {allocated} bytes");
+
+        remote.accounts().write().insert(address, AccountInfo::from_balance(U256::from(9)));
+        remote.storage().write().get_mut(&address).unwrap().insert(U256::ZERO, U256::from(9));
+        remote.block_hashes().write().insert(U256::ONE, B256::with_last_byte(9));
+        remote.db().clear();
+        for snapshot in snapshots {
+            assert_eq!(snapshot.basic_ref(address).unwrap().unwrap().balance, U256::from(7));
+            assert_eq!(snapshot.storage_ref(address, U256::ZERO).unwrap(), U256::ONE);
+            assert_eq!(
+                snapshot.storage_ref(address, U256::from(16_383)).unwrap(),
+                U256::from(16_384)
+            );
+            assert_eq!(snapshot.block_hash_ref(1).unwrap(), B256::with_last_byte(7));
+        }
+    }
 
     fn fork_snapshot_with_closed_backend() -> ForkDbStateSnapshot<AnyNetwork> {
         let provider =
