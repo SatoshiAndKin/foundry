@@ -126,21 +126,9 @@ impl<N: Network, B: ForkBlockEnv> ForkedDatabase<N, B> {
                 state_snapshot: StateSnapshot { accounts, storage, block_hashes },
             } = state_snapshot;
             let db = self.inner().db();
-            {
-                let mut accounts_lock = db.accounts.write();
-                accounts_lock.clear();
-                accounts_lock.extend(accounts);
-            }
-            {
-                let mut storage_lock = db.storage.write();
-                storage_lock.clear();
-                storage_lock.extend(storage);
-            }
-            {
-                let mut block_hashes_lock = db.block_hashes.write();
-                block_hashes_lock.clear();
-                block_hashes_lock.extend(block_hashes);
-            }
+            *db.accounts.write() = accounts;
+            *db.storage.write() = storage;
+            *db.block_hashes.write() = block_hashes;
 
             self.cache_db = local;
 
@@ -371,12 +359,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fork_db_revert_preserves_retained_history_and_local_overrides() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fork_db_revert_preserves_retained_history_and_local_overrides() {
         let provider =
             ProviderBuilder::<_, _, AnyNetwork>::default().connect_mocked_client(Asserter::new());
         let remote = BlockchainDb::new(
-            BlockchainDbMeta::new(BlockEnv::default(), "http://localhost".to_string()),
+            BlockchainDbMeta::new(
+                BlockEnv { number: U256::from(2), ..Default::default() },
+                "http://localhost".to_string(),
+            ),
             None,
         );
         let address = Address::random();
@@ -384,7 +375,7 @@ mod tests {
         remote.storage().write().entry(address).or_default().insert(U256::ZERO, U256::from(13));
         remote.block_hashes().write().insert(U256::ONE, B256::with_last_byte(15));
         let (backend, handler) = SharedBackend::new(provider, remote.clone(), None);
-        drop(handler);
+        let handler_task = tokio::spawn(handler);
         let mut db = ForkedDatabase::new(backend, remote.clone());
         db.database_mut().insert_account_info(address, AccountInfo::from_balance(U256::from(11)));
         let saved = db.insert_state_snapshot();
@@ -406,6 +397,8 @@ mod tests {
             assert_eq!(retained.block_hash_ref(1).unwrap(), B256::with_last_byte(15));
         }
         assert!(!db.revert_state_snapshot(saved, RevertStateSnapshotAction::RevertRemove));
+        handler_task.abort();
+        assert!(handler_task.await.unwrap_err().is_cancelled());
     }
 
     fn fork_snapshot_with_closed_backend() -> ForkDbStateSnapshot<AnyNetwork> {
