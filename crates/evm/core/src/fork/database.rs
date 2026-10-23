@@ -371,6 +371,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fork_db_revert_preserves_retained_history_and_local_overrides() {
+        let provider =
+            ProviderBuilder::<_, _, AnyNetwork>::default().connect_mocked_client(Asserter::new());
+        let remote = BlockchainDb::new(
+            BlockchainDbMeta::new(BlockEnv::default(), "http://localhost".to_string()),
+            None,
+        );
+        let address = Address::random();
+        remote.accounts().write().insert(address, AccountInfo::from_balance(U256::from(7)));
+        remote.storage().write().entry(address).or_default().insert(U256::ZERO, U256::from(13));
+        remote.block_hashes().write().insert(U256::ONE, B256::with_last_byte(15));
+        let (backend, handler) = SharedBackend::new(provider, remote.clone(), None);
+        drop(handler);
+        let mut db = ForkedDatabase::new(backend, remote.clone());
+        db.database_mut().insert_account_info(address, AccountInfo::from_balance(U256::from(11)));
+        let saved = db.insert_state_snapshot();
+        let retained = db.create_state_snapshot();
+
+        for action in
+            [RevertStateSnapshotAction::RevertKeep, RevertStateSnapshotAction::RevertRemove]
+        {
+            remote.db().clear();
+            db.database_mut()
+                .insert_account_info(address, AccountInfo::from_balance(U256::from(99)));
+            assert!(db.revert_state_snapshot(saved, action));
+            assert_eq!(remote.accounts().read()[&address].balance, U256::from(7));
+            assert_eq!(db.basic_ref(address).unwrap().unwrap().balance, U256::from(11));
+            assert_eq!(db.storage_ref(address, U256::ZERO).unwrap(), U256::from(13));
+            assert_eq!(db.block_hash_ref(1).unwrap(), B256::with_last_byte(15));
+            assert_eq!(retained.basic_ref(address).unwrap().unwrap().balance, U256::from(11));
+            assert_eq!(retained.storage_ref(address, U256::ZERO).unwrap(), U256::from(13));
+            assert_eq!(retained.block_hash_ref(1).unwrap(), B256::with_last_byte(15));
+        }
+        assert!(!db.revert_state_snapshot(saved, RevertStateSnapshotAction::RevertRemove));
+    }
+
     fn fork_snapshot_with_closed_backend() -> ForkDbStateSnapshot<AnyNetwork> {
         let provider =
             ProviderBuilder::<_, _, AnyNetwork>::default().connect_mocked_client(Asserter::new());
