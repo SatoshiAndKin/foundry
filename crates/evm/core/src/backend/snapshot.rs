@@ -1,19 +1,20 @@
 use crate::backend::JournaledState;
 use alloy_evm::EvmEnv;
-use alloy_primitives::{
-    B256, U256,
-    map::{AddressHashMap, U256Map},
-};
+use alloy_primitives::{Address, B256, U256};
+use foundry_fork_db::cache::StorageInfo;
+use imbl::HashMap as PersistentMap;
 use revm::state::AccountInfo;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use std::collections::BTreeMap;
 
-/// A minimal abstraction of a state at a certain point in time
+/// A minimal abstraction of a state at a certain point in time.
+///
+/// Persistent maps preserve frozen values while sharing unchanged cache entries.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct StateSnapshot {
-    pub accounts: AddressHashMap<AccountInfo>,
-    pub storage: AddressHashMap<U256Map<U256>>,
-    pub block_hashes: U256Map<B256>,
+    pub accounts: PersistentMap<Address, AccountInfo>,
+    pub storage: PersistentMap<Address, StorageInfo>,
+    pub block_hashes: PersistentMap<U256, B256>,
 }
 
 impl Serialize for StateSnapshot {
@@ -87,7 +88,6 @@ impl RevertStateSnapshotAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::Address;
 
     #[test]
     fn state_snapshot_serializes_maps_in_key_order() {

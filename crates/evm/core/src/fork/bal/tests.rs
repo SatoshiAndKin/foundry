@@ -7,7 +7,7 @@ use alloy_eips::{
     },
 };
 use alloy_network::{AnyHeader, AnyRpcHeader};
-use alloy_primitives::{Address, Bytes, bytes};
+use alloy_primitives::{Bytes, U256, bytes};
 use alloy_provider::{ProviderBuilder, mock::Asserter};
 use alloy_rpc_types::{Block, BlockTransactions};
 use foundry_config::FoundryHardfork;
@@ -141,7 +141,7 @@ fn fork_bal_cache_preserves_cached_values_and_merges_slots() {
                 (U256::from(3), U256::from(303)),
             ]
             .into_iter()
-            .collect()
+            .collect::<StorageInfo>()
         );
     }
 }
@@ -396,7 +396,12 @@ fn fork_bal_cache_counts_only_new_entries() {
     assert_eq!(storage.len(), 2);
     assert_eq!(
         storage[&cached_address],
-        [(U256::ONE, U256::from(101)), (U256::from(2), U256::from(22))].into_iter().collect()
+        [(U256::ONE, U256::from(101)), (U256::from(2), U256::from(22))]
+            .into_iter()
+            .collect::<StorageInfo>()
     );
-    assert_eq!(storage[&new_address], [(U256::ONE, U256::ZERO)].into_iter().collect());
+    assert_eq!(
+        storage[&new_address],
+        [(U256::ONE, U256::ZERO)].into_iter().collect::<StorageInfo>()
+    );
 }
