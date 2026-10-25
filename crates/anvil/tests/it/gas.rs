@@ -564,3 +564,54 @@ async fn test_estimation_with_print_traces() {
     }
     assert_eq!(results[0], results[1]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_call_console_interception_follows_log_configuration() {
+    for print_logs in [false, true] {
+        let (api, handle) = spawn(NodeConfig::test().with_print_logs(print_logs)).await;
+        let from = handle.dev_accounts().next().unwrap();
+        let request = WithOtherFields::new(
+            TransactionRequest::default()
+                .from(from)
+                .to(HARDHAT_CONSOLE_ADDRESS)
+                .gas_limit(200_000)
+                .input(bytes!("01").into()),
+        );
+        let call = api.call(request.clone(), None, Default::default()).await;
+        let estimate = api.estimate_gas(request, None, Default::default()).await;
+        if print_logs {
+            let BlockchainError::InvalidTransaction(InvalidTransactionError::Revert(Some(
+                call_data,
+            ))) = call.unwrap_err()
+            else {
+                panic!("expected console decoding revert from call");
+            };
+            let BlockchainError::InvalidTransaction(InvalidTransactionError::Revert(Some(
+                estimate_data,
+            ))) = estimate.unwrap_err()
+            else {
+                panic!("expected console decoding revert from estimate");
+            };
+            assert!(!call_data.is_empty());
+            assert_eq!(call_data, estimate_data);
+        } else {
+            // With logging disabled, the console address behaves like an ordinary empty account.
+            let ordinary = WithOtherFields::new(
+                TransactionRequest::default()
+                    .from(from)
+                    .to(Address::random())
+                    .gas_limit(200_000)
+                    .input(bytes!("01").into()),
+            );
+            assert_eq!(
+                call.unwrap(),
+                api.call(ordinary.clone(), None, Default::default()).await.unwrap()
+            );
+            assert_eq!(
+                estimate.unwrap(),
+                api.estimate_gas(ordinary, None, Default::default()).await.unwrap()
+            );
+        }
+        assert_eq!(handle.http_provider().get_transaction_count(from).await.unwrap(), 0);
+    }
+}
