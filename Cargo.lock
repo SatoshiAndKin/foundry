@@ -6260,7 +6260,7 @@ dependencies = [
 [[package]]
 name = "foundry-fork-db"
 version = "0.27.0"
-source = "git+https://github.com/SatoshiAndKin/foundry-core?rev=6abf81c73df0aa8692324bd8c3dc038b80266bd5#6abf81c73df0aa8692324bd8c3dc038b80266bd5"
+source = "git+https://github.com/SatoshiAndKin/foundry-core?rev=36c673fd06e9d459d21352fa467f40ee4897e300#36c673fd06e9d459d21352fa467f40ee4897e300"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
