@@ -254,14 +254,9 @@ impl PersistentStateDb {
                 .accounts
                 .iter()
                 .filter(|(_, account)| account.account_state != AccountState::NotExisting)
-                .map(|(address, account)| {
-                    (
-                        *address,
-                        account.storage.iter().map(|(slot, value)| (*slot, *value)).collect(),
-                    )
-                })
+                .map(|(address, account)| (*address, account.storage.clone()))
                 .collect(),
-            block_hashes: self.block_hashes.iter().map(|(number, hash)| (*number, *hash)).collect(),
+            block_hashes: self.block_hashes.clone(),
         }
     }
 
@@ -355,15 +350,10 @@ impl MaybeFullDatabase for PersistentStateDb {
                 if let Some(code) = &info.code {
                     contracts.insert(info.code_hash, code.clone());
                 }
-                let storage = storage
-                    .remove(&address)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect::<PersistentMap<_, _>>();
+                let storage = storage.remove(&address).unwrap_or_default();
                 (address, PersistentAccount { info, account_state: AccountState::None, storage })
             })
             .collect();
-        let block_hashes = block_hashes.into_iter().collect();
         *self = Self { accounts, contracts, block_hashes, full: OnceLock::new() };
     }
 }

@@ -126,21 +126,9 @@ impl<N: Network, B: ForkBlockEnv> ForkedDatabase<N, B> {
                 state_snapshot: StateSnapshot { accounts, storage, block_hashes },
             } = state_snapshot;
             let db = self.inner().db();
-            {
-                let mut accounts_lock = db.accounts.write();
-                accounts_lock.clear();
-                accounts_lock.extend(accounts);
-            }
-            {
-                let mut storage_lock = db.storage.write();
-                storage_lock.clear();
-                storage_lock.extend(storage);
-            }
-            {
-                let mut block_hashes_lock = db.block_hashes.write();
-                block_hashes_lock.clear();
-                block_hashes_lock.extend(block_hashes);
-            }
+            *db.accounts.write() = accounts;
+            *db.storage.write() = storage;
+            *db.block_hashes.write() = block_hashes;
 
             self.cache_db = local;
 
@@ -284,6 +272,134 @@ mod tests {
     use alloy_provider::{ProviderBuilder, mock::Asserter};
     use foundry_common::provider::get_http_provider;
     use revm::database::DbAccount;
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+        hint::black_box,
+    };
+
+    struct SnapshotTestAllocator;
+
+    thread_local! {
+        static SNAPSHOT_ALLOCATED_BYTES: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    fn count_snapshot_allocation(bytes: usize) {
+        SNAPSHOT_ALLOCATED_BYTES.with(|count| {
+            if let Some(previous) = count.get() {
+                count.set(Some(previous + bytes));
+            }
+        });
+    }
+
+    unsafe impl GlobalAlloc for SnapshotTestAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            count_snapshot_allocation(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            count_snapshot_allocation(layout.size());
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            count_snapshot_allocation(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static SNAPSHOT_TEST_ALLOCATOR: SnapshotTestAllocator = SnapshotTestAllocator;
+
+    #[test]
+    fn fork_history_snapshots_bound_cache_copy_memory() {
+        let provider =
+            ProviderBuilder::<_, _, AnyNetwork>::default().connect_mocked_client(Asserter::new());
+        let remote = BlockchainDb::new(
+            BlockchainDbMeta::new(BlockEnv::default(), "http://localhost".to_string()),
+            None,
+        );
+        let address = Address::with_last_byte(1);
+        remote.accounts().write().insert(address, AccountInfo::from_balance(U256::from(7)));
+        remote
+            .storage()
+            .write()
+            .entry(address)
+            .or_default()
+            .extend((0..16_384u64).map(|slot| (U256::from(slot), U256::from(slot + 1))));
+        remote.block_hashes().write().insert(U256::ONE, B256::with_last_byte(7));
+        let (backend, handler) = SharedBackend::new(provider, remote.clone(), None);
+        drop(handler);
+        let db = ForkedDatabase::new(backend, remote.clone());
+
+        SNAPSHOT_ALLOCATED_BYTES.with(|count| count.set(Some(0)));
+        let snapshots = (0..96).map(|_| db.create_state_snapshot()).collect::<Vec<_>>();
+        black_box(&snapshots);
+        let allocated = SNAPSHOT_ALLOCATED_BYTES.with(|count| count.replace(None).unwrap());
+        foundry_common::sh_println!("96 fork snapshots allocated {allocated} bytes").unwrap();
+        assert!(allocated < 1024 * 1024, "fork snapshots allocated {allocated} bytes");
+
+        remote.accounts().write().insert(address, AccountInfo::from_balance(U256::from(9)));
+        remote.storage().write().get_mut(&address).unwrap().insert(U256::ZERO, U256::from(9));
+        remote.block_hashes().write().insert(U256::ONE, B256::with_last_byte(9));
+        remote.db().clear();
+        for snapshot in snapshots {
+            assert_eq!(snapshot.basic_ref(address).unwrap().unwrap().balance, U256::from(7));
+            assert_eq!(snapshot.storage_ref(address, U256::ZERO).unwrap(), U256::ONE);
+            assert_eq!(
+                snapshot.storage_ref(address, U256::from(16_383)).unwrap(),
+                U256::from(16_384)
+            );
+            assert_eq!(snapshot.block_hash_ref(1).unwrap(), B256::with_last_byte(7));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fork_db_revert_preserves_retained_history_and_local_overrides() {
+        let provider =
+            ProviderBuilder::<_, _, AnyNetwork>::default().connect_mocked_client(Asserter::new());
+        let remote = BlockchainDb::new(
+            BlockchainDbMeta::new(
+                BlockEnv { number: U256::from(2), ..Default::default() },
+                "http://localhost".to_string(),
+            ),
+            None,
+        );
+        let address = Address::random();
+        remote.accounts().write().insert(address, AccountInfo::from_balance(U256::from(7)));
+        remote.storage().write().entry(address).or_default().insert(U256::ZERO, U256::from(13));
+        remote.block_hashes().write().insert(U256::ONE, B256::with_last_byte(15));
+        let (backend, handler) = SharedBackend::new(provider, remote.clone(), None);
+        let handler_task = tokio::spawn(handler);
+        let mut db = ForkedDatabase::new(backend, remote.clone());
+        db.database_mut().insert_account_info(address, AccountInfo::from_balance(U256::from(11)));
+        let saved = db.insert_state_snapshot();
+        let retained = db.create_state_snapshot();
+
+        for action in
+            [RevertStateSnapshotAction::RevertKeep, RevertStateSnapshotAction::RevertRemove]
+        {
+            remote.db().clear();
+            db.database_mut()
+                .insert_account_info(address, AccountInfo::from_balance(U256::from(99)));
+            assert!(db.revert_state_snapshot(saved, action));
+            assert_eq!(remote.accounts().read()[&address].balance, U256::from(7));
+            assert_eq!(db.basic_ref(address).unwrap().unwrap().balance, U256::from(11));
+            assert_eq!(db.storage_ref(address, U256::ZERO).unwrap(), U256::from(13));
+            assert_eq!(db.block_hash_ref(1).unwrap(), B256::with_last_byte(15));
+            assert_eq!(retained.basic_ref(address).unwrap().unwrap().balance, U256::from(11));
+            assert_eq!(retained.storage_ref(address, U256::ZERO).unwrap(), U256::from(13));
+            assert_eq!(retained.block_hash_ref(1).unwrap(), B256::with_last_byte(15));
+        }
+        assert!(!db.revert_state_snapshot(saved, RevertStateSnapshotAction::RevertRemove));
+        handler_task.abort();
+        assert!(handler_task.await.unwrap_err().is_cancelled());
+    }
 
     fn fork_snapshot_with_closed_backend() -> ForkDbStateSnapshot<AnyNetwork> {
         let provider =

@@ -11,6 +11,7 @@ use alloy_provider::ProviderBuilder;
 use alloy_rpc_types::Block;
 use alloy_transport::mock::Asserter;
 use foundry_evm::{backend::BlockchainDbMeta, hardfork::EthereumHardfork};
+use imbl::HashMap as PersistentMap;
 use revm::{context::BlockEnv, state::AccountInfo};
 
 fn database(hash: B256) -> BlockchainDb {
@@ -304,7 +305,7 @@ fn fork_bal_seed_preserves_cached_values_and_merges_slots() {
             (U256::from(3), U256::from(303)),
         ]
         .into_iter()
-        .collect()
+        .collect::<PersistentMap<_, _>>()
     );
 }
 

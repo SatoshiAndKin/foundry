@@ -10,15 +10,13 @@ use alloy_eips::{
 };
 use alloy_hardforks::EthereumHardfork;
 use alloy_network::{AnyNetwork, AnyRpcBlock};
-use alloy_primitives::{
-    B256, U256,
-    map::{AddressHashMap, U256Map},
-};
+use alloy_primitives::{Address, B256};
 use alloy_provider::Provider;
 use eyre::{Result, WrapErr};
 use foundry_common::provider::is_rpc_method_not_found;
 use foundry_evm_networks::NetworkConfigs;
-use foundry_fork_db::cache::MemDb;
+use foundry_fork_db::cache::{MemDb, StorageInfo};
+use imbl::HashMap as PersistentMap;
 use revm::state::{AccountInfo, Bytecode};
 use std::time::Duration;
 
@@ -123,7 +121,10 @@ pub fn cache_bal(db: &MemDb, bal: BlockAccessList) {
 }
 
 /// Inserts complete account post-states, retaining existing accounts, and returns the added count.
-fn cache_bal_accounts(accounts: &mut AddressHashMap<AccountInfo>, bal: &BlockAccessList) -> usize {
+fn cache_bal_accounts(
+    accounts: &mut PersistentMap<Address, AccountInfo>,
+    bal: &BlockAccessList,
+) -> usize {
     let accounts_before = accounts.len();
     for account in bal {
         if let (Some(balance), Some(nonce), Some(code)) =
@@ -147,13 +148,14 @@ fn cache_bal_accounts(accounts: &mut AddressHashMap<AccountInfo>, bal: &BlockAcc
 /// Inserts final slot writes, retaining cached values and leaving read-only slots unknown.
 ///
 /// Returns the number of added slots.
-fn cache_bal_storage(storage: &mut AddressHashMap<U256Map<U256>>, bal: &BlockAccessList) -> usize {
+fn cache_bal_storage(
+    storage: &mut PersistentMap<Address, StorageInfo>,
+    bal: &BlockAccessList,
+) -> usize {
     let mut inserted_slots = 0;
     for account in bal {
         if !account.storage_changes.is_empty() {
-            let cached_slots = storage.entry(account.address).or_insert_with(|| {
-                U256Map::with_capacity_and_hasher(account.storage_changes.len(), Default::default())
-            });
+            let cached_slots = storage.entry(account.address).or_default();
             let slots_before = cached_slots.len();
             for (slot, value) in account.storage_post_states() {
                 cached_slots.entry(slot).or_insert(value);

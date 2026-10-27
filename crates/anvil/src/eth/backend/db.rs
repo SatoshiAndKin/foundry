@@ -7,7 +7,7 @@ use alloy_evm::block::BalIndexedDatabase;
 use alloy_network::Network;
 use alloy_primitives::{
     Address, B256, Bytes, U256, keccak256,
-    map::{AddressMap, HashMap, U256Map},
+    map::{AddressMap, U256Map},
 };
 use alloy_rpc_types::BlockId;
 use anvil_core::eth::{
@@ -20,6 +20,7 @@ use foundry_evm::backend::{
     StateSnapshot, existing_account,
 };
 use foundry_primitives::{FoundryHeader, FoundryReceiptEnvelope, FoundryTxEnvelope};
+use imbl::HashMap as PersistentMap;
 use revm::{
     Database, DatabaseCommit,
     bytecode::Bytecode,
@@ -505,31 +506,33 @@ impl<T: MaybeFullDatabase> MaybeFullDatabase for CacheDB<T> {
 
     fn clear_into_state_snapshot(&mut self) -> StateSnapshot {
         let db_accounts = std::mem::take(&mut self.cache.accounts);
-        let mut accounts = HashMap::default();
-        let mut account_storage = HashMap::default();
+        let mut accounts = PersistentMap::new();
+        let mut account_storage = PersistentMap::new();
 
         for (addr, mut acc) in db_accounts {
-            account_storage.insert(addr, std::mem::take(&mut acc.storage));
+            account_storage.insert(addr, std::mem::take(&mut acc.storage).into_iter().collect());
             let mut info = acc.info;
             info.code = self.cache.contracts.remove(&info.code_hash);
             accounts.insert(addr, info);
         }
-        let block_hashes = std::mem::take(&mut self.cache.block_hashes);
+        let block_hashes = std::mem::take(&mut self.cache.block_hashes).into_iter().collect();
         StateSnapshot { accounts, storage: account_storage, block_hashes }
     }
 
     fn read_as_state_snapshot(&self) -> StateSnapshot {
-        let mut accounts = HashMap::default();
-        let mut account_storage = HashMap::default();
+        let mut accounts = PersistentMap::new();
+        let mut account_storage = PersistentMap::new();
 
         for (addr, acc) in &self.cache.accounts {
-            account_storage.insert(*addr, acc.storage.clone());
+            account_storage
+                .insert(*addr, acc.storage.iter().map(|(slot, value)| (*slot, *value)).collect());
             let mut info = acc.info.clone();
             info.code = self.cache.contracts.get(&info.code_hash).cloned();
             accounts.insert(*addr, info);
         }
 
-        let block_hashes = self.cache.block_hashes.clone();
+        let block_hashes =
+            self.cache.block_hashes.iter().map(|(number, hash)| (*number, *hash)).collect();
         StateSnapshot { accounts, storage: account_storage, block_hashes }
     }
 
@@ -548,12 +551,12 @@ impl<T: MaybeFullDatabase> MaybeFullDatabase for CacheDB<T> {
                 addr,
                 DbAccount {
                     info: acc,
-                    storage: storage.remove(&addr).unwrap_or_default(),
+                    storage: storage.remove(&addr).unwrap_or_default().into_iter().collect(),
                     ..Default::default()
                 },
             );
         }
-        self.cache.block_hashes = block_hashes;
+        self.cache.block_hashes = block_hashes.into_iter().collect();
     }
 }
 
