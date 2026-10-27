@@ -567,8 +567,10 @@ async fn test_estimation_with_print_traces() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_call_console_interception_follows_log_configuration() {
-    for print_logs in [false, true] {
-        let (api, handle) = spawn(NodeConfig::test().with_print_logs(print_logs)).await;
+    for (print_logs, print_traces) in [(false, false), (false, true), (true, false), (true, true)] {
+        let (api, handle) =
+            spawn(NodeConfig::test().with_print_logs(print_logs).with_print_traces(print_traces))
+                .await;
         let from = handle.dev_accounts().next().unwrap();
         let request = WithOtherFields::new(
             TransactionRequest::default()
