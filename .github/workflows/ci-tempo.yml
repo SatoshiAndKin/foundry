@@ -30,7 +30,7 @@ on:
           - both
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: "${{ github.event_name == 'pull_request' && format('pr-ci-ci-tempo.yml-pull_request-{0}', github.event.number || github.run_id) || format('{0}-{1}', github.workflow, github.head_ref || github.run_id) }}"
   cancel-in-progress: true
 
 env:
